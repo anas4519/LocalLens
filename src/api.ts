@@ -10,3 +10,11 @@ export interface Session {
 export const startSession = () => invoke<Session>("start_session");
 export const stopSession = () => invoke<Session>("stop_session");
 export const listSessions = () => invoke<Session[]>("list_sessions");
+
+export interface CaptureStatus {
+  has_permission: boolean;
+  active: Session | null;
+  capture_error: string | null;
+}
+
+export const captureStatus = () => invoke<CaptureStatus>("capture_status");

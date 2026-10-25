@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Session, listSessions, startSession, stopSession } from "./api";
+import { Session, captureStatus, listSessions, startSession, stopSession } from "./api";
 
 function fmtDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -16,6 +16,8 @@ export default function App() {
   const [now, setNow] = useState(Date.now());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [hasPermission, setHasPermission] = useState(true);
+  const [captureError, setCaptureError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -27,9 +29,27 @@ export default function App() {
     }
   }, []);
 
+  const pollStatus = useCallback(async () => {
+    try {
+      const st = await captureStatus();
+      setHasPermission(st.has_permission);
+      setCaptureError(st.capture_error);
+      setActive(st.active);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
   useEffect(() => {
     refresh();
-  }, [refresh]);
+    pollStatus();
+  }, [refresh, pollStatus]);
+
+  // Live frame count: poll while recording; re-check permission every few seconds when idle.
+  useEffect(() => {
+    const t = setInterval(pollStatus, active ? 2000 : 5000);
+    return () => clearInterval(t);
+  }, [active, pollStatus]);
 
   useEffect(() => {
     if (!active) return;
@@ -61,6 +81,16 @@ export default function App() {
         <p className="tagline">Private memory for the sessions you choose. Nothing leaves this Mac.</p>
       </header>
 
+      {!hasPermission && (
+        <section className="notice">
+          <strong>Screen Recording permission needed</strong>
+          <p>
+            Open System Settings → Privacy &amp; Security → Screen Recording, enable LocalLens (or your terminal in dev
+            mode), then quit and reopen the app.
+          </p>
+        </section>
+      )}
+
       <section className="capture">
         <div className={`timer ${active ? "live" : ""}`}>
           {active ? fmtDuration(now - active.started_at) : "00:00"}
@@ -68,7 +98,10 @@ export default function App() {
         <button className={`primary ${active ? "stop" : "start"}`} onClick={toggle} disabled={busy}>
           {active ? "Stop session" : "Start session"}
         </button>
-        <p className="status">{active ? "Recording session…" : "Idle"}</p>
+        <p className="status">
+          {active ? `Recording · ${active.frame_count} ${active.frame_count === 1 ? "frame" : "frames"}` : "Idle"}
+        </p>
+        {captureError && <p className="error">Capture problem: {captureError}</p>}
         {error && <p className="error">{error}</p>}
       </section>
 
