@@ -1,15 +1,15 @@
 //! Windows placeholder. Planned: Windows.Graphics.Capture + Windows.Media.Ocr.
 //! Not started until the macOS build has been used weekly for ~a month.
-use super::{CaptureError, Frame, OcrEngine, ScreenCapturer};
+use super::{CaptureError, Frame, OcrEngine, RawImage, ScreenSource};
 
-#[allow(dead_code)]
 #[derive(Default)]
-pub struct WinCapturer;
+pub struct WinSource;
 
-impl ScreenCapturer for WinCapturer {
-    fn start(&mut self) -> Result<(), CaptureError> { Err(CaptureError::Unsupported) }
-    fn stop(&mut self) -> Result<(), CaptureError> { Ok(()) }
-    fn next_frame(&mut self) -> Result<Option<Frame>, CaptureError> { Ok(None) }
+impl ScreenSource for WinSource {
+    fn available(&self) -> Result<(), CaptureError> { Err(CaptureError::Unsupported) }
+    fn has_permission(&self) -> bool { true }
+    fn permission_hint(&self) -> &'static str { "" }
+    fn grab(&mut self, _max_edge: usize) -> Result<RawImage, CaptureError> { Err(CaptureError::Unsupported) }
 }
 
 #[allow(dead_code)]

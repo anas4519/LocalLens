@@ -1,7 +1,9 @@
 //! Platform capture + OCR live behind these traits so the core (sessions,
 //! storage, search, Q&A) is shared and only a thin layer is per-OS.
 
+pub mod capturer;
 pub mod dedup;
+pub use capturer::{Capturer, RawImage, ScreenSource};
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "windows")]
@@ -29,29 +31,35 @@ pub enum CaptureError {
     Other(String),
 }
 
-/// The capturer for the current OS.
+/// The screen source for the current OS (the only cfg'd choice point).
+#[cfg(target_os = "macos")]
+pub type PlatformSource = macos::MacSource;
+#[cfg(target_os = "windows")]
+pub type PlatformSource = windows::WinSource;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub type PlatformSource = NoSource;
+
+pub type PlatformCapturer = Capturer<PlatformSource>;
+
+/// The capturer for the current OS: shared logic over the per-OS source.
 pub fn platform_capturer() -> Box<dyn ScreenCapturer> {
-    #[cfg(target_os = "macos")]
-    return Box::new(macos::MacCapturer::default());
-    #[cfg(target_os = "windows")]
-    return Box::new(windows::WinCapturer::default());
-    #[allow(unreachable_code)]
-    Box::new(NoCapturer)
+    Box::new(PlatformCapturer::new(PlatformSource::default()))
 }
 
 /// Screen-capture permission status for the current OS.
 pub fn has_permission() -> bool {
-    #[cfg(target_os = "macos")]
-    return macos::has_screen_permission();
-    #[allow(unreachable_code)]
-    true
+    PlatformSource::default().has_permission()
 }
 
-struct NoCapturer;
-impl ScreenCapturer for NoCapturer {
-    fn start(&mut self) -> Result<(), CaptureError> { Err(CaptureError::Unsupported) }
-    fn stop(&mut self) -> Result<(), CaptureError> { Ok(()) }
-    fn next_frame(&mut self) -> Result<Option<Frame>, CaptureError> { Ok(None) }
+/// Fallback for OSes we don't target yet.
+#[allow(dead_code)]
+#[derive(Default)]
+pub struct NoSource;
+impl ScreenSource for NoSource {
+    fn available(&self) -> Result<(), CaptureError> { Err(CaptureError::Unsupported) }
+    fn has_permission(&self) -> bool { true }
+    fn permission_hint(&self) -> &'static str { "" }
+    fn grab(&mut self, _max_edge: usize) -> Result<RawImage, CaptureError> { Err(CaptureError::Unsupported) }
 }
 
 /// Grabs frames from the screen. Implementations should skip near-duplicate
