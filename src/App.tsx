@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import Gallery from "./Gallery";
 import { Session, captureStatus, listSessions, startSession, stopSession } from "./api";
 
 function fmtDuration(ms: number): string {
@@ -17,6 +18,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [hasPermission, setHasPermission] = useState(true);
+  const [viewing, setViewing] = useState<Session | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -74,6 +76,8 @@ export default function App() {
 
   const past = sessions.filter((s) => s.ended_at !== null);
 
+  if (viewing) return <Gallery session={viewing} onBack={() => setViewing(null)} />;
+
   return (
     <main className="app">
       <header className="header">
@@ -112,7 +116,7 @@ export default function App() {
         ) : (
           <ul>
             {past.map((s) => (
-              <li key={s.id}>
+              <li key={s.id} className="clickable" onClick={() => setViewing(s)}>
                 <span className="when">{new Date(s.started_at).toLocaleString()}</span>
                 <span className="meta">
                   {fmtDuration((s.ended_at ?? s.started_at) - s.started_at)} · {s.frame_count} frames

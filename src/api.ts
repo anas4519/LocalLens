@@ -18,3 +18,12 @@ export interface CaptureStatus {
 }
 
 export const captureStatus = () => invoke<CaptureStatus>("capture_status");
+
+export interface FrameRow {
+  id: number;
+  ts: number; // unix ms
+  image_path: string | null; // absolute; null when pruned
+  ocr_text: string;
+}
+
+export const listFrames = (sessionId: number) => invoke<FrameRow[]>("list_frames", { sessionId });

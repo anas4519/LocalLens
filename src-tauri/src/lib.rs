@@ -1,7 +1,7 @@
 mod capture;
 mod db;
 
-use db::{Db, Session};
+use db::{Db, FrameRow, Session};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -111,6 +111,22 @@ fn list_sessions(state: State<AppState>) -> Result<Vec<Session>, String> {
     state.db.lock().map_err(err)?.list_sessions().map_err(err)
 }
 
+/// Frames of one session. `image_path` is made absolute so the UI can load it
+/// through the asset protocol (scoped to the frames dir in tauri.conf.json).
+#[tauri::command]
+fn list_frames(state: State<AppState>, session_id: i64) -> Result<Vec<FrameRow>, String> {
+    let mut frames = state.db.lock().map_err(err)?.list_frames(session_id).map_err(err)?;
+    for f in &mut frames {
+        f.image_path = f
+            .image_path
+            .take()
+            .map(|p| state.data_dir.join(p))
+            .filter(|p| p.exists()) // pruned or deleted file -> placeholder
+            .map(|p| p.to_string_lossy().into_owned());
+    }
+    Ok(frames)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -124,7 +140,7 @@ pub fn run() {
             app.manage(AppState { db: Arc::new(Mutex::new(db)), data_dir: dir, recorder: Mutex::new(None) });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![start_session, stop_session, list_sessions, capture_status])
+        .invoke_handler(tauri::generate_handler![start_session, stop_session, list_sessions, capture_status, list_frames])
         .run(tauri::generate_context!())
         .expect("error while running LocalLens");
 }

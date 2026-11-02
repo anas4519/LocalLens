@@ -8,6 +8,15 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FrameRow {
+    pub id: i64,
+    pub ts: i64,
+    /// Relative to the app data dir; None once the image was pruned.
+    pub image_path: Option<String>,
+    pub ocr_text: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Session {
     pub id: i64,
     pub started_at: i64,
@@ -123,6 +132,17 @@ impl Db {
         rows.collect()
     }
 
+    /// All frames of a session, oldest first.
+    pub fn list_frames(&self, session_id: i64) -> rusqlite::Result<Vec<FrameRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts, image_path, ocr_text FROM frames WHERE session_id = ?1 ORDER BY ts, id",
+        )?;
+        let rows = stmt.query_map([session_id], |r| {
+            Ok(FrameRow { id: r.get(0)?, ts: r.get(1)?, image_path: r.get(2)?, ocr_text: r.get(3)? })
+        })?;
+        rows.collect()
+    }
+
     fn get(&self, id: i64) -> rusqlite::Result<Session> {
         self.conn.query_row(
             "SELECT s.id, s.started_at, s.ended_at, (SELECT COUNT(*) FROM frames f WHERE f.session_id = s.id)
@@ -158,6 +178,20 @@ mod tests {
         let all = db.list_sessions().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0], stopped);
+    }
+
+    #[test]
+    fn list_frames_is_ordered_and_keeps_pruned() {
+        let db = Db::open_in_memory().unwrap();
+        let s = db.start_session().unwrap();
+        db.add_frame(s.id, 20, Some("frames/1/20.jpg"), "").unwrap();
+        db.add_frame(s.id, 10, None, "old").unwrap();
+        let other = db.stop_session().and_then(|_| db.start_session()).unwrap();
+        db.add_frame(other.id, 5, None, "").unwrap();
+        let f = db.list_frames(s.id).unwrap();
+        assert_eq!(f.iter().map(|f| f.ts).collect::<Vec<_>>(), vec![10, 20]);
+        assert_eq!(f[0].image_path, None);
+        assert_eq!(f[1].image_path.as_deref(), Some("frames/1/20.jpg"));
     }
 
     #[test]
