@@ -93,7 +93,7 @@ export default function SessionTitle({ session, onRenamed, variant, as: Tag = "h
       <div className="flex flex-col gap-1 min-w-0 w-full max-w-xl" onClick={(e) => e.stopPropagation()}>
         <input
           ref={input}
-          className={`${st.input} w-full bg-surface-container-lowest text-on-surface placeholder:text-outline rounded-lg px-space-sm py-1 shadow-[0_0_0_1px_rgba(202,190,255,0.4),0_0_18px_rgba(148,125,255,0.18)] focus:outline-none select-text`}
+          className={`${st.input} w-full bg-surface-container-lowest text-on-surface placeholder:text-outline rounded-lg px-space-sm py-1 shadow-[0_0_0_1px_rgba(252,211,77,0.4),0_0_18px_rgba(245,158,11,0.18)] focus:outline-none select-text`}
           value={draft}
           maxLength={MAX_SESSION_NAME}
           placeholder="Session name (blank = date + time)"

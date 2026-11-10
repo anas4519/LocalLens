@@ -17,5 +17,5 @@
 mark { background: transparent; color: inherit; }
 
 /* The ⌘K results list and gallery cards are focusable divs; keep focus visible but on-brand. */
-:focus-visible { outline: 2px solid rgba(202, 190, 255, 0.45); outline-offset: 2px; }
+:focus-visible { outline: 2px solid rgba(252, 211, 77, 0.45); outline-offset: 2px; }
 input:focus-visible { outline: none; }

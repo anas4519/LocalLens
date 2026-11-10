@@ -132,7 +132,7 @@ export default function Search({ query, onQueryChange, onOpen, onOpenSession, fo
       {/* Query bar */}
       <div className="px-space-xl pt-space-lg pb-space-md flex flex-col gap-space-sm bg-surface-container-low shadow-sm">
         <div className="flex items-center justify-between gap-space-md">
-          <div className="relative flex-1 flex items-center bg-surface-container-highest/70 rounded-xl px-space-md py-2.5 shadow-[0_0_0_1px_rgba(202,190,255,0.4),0_0_18px_rgba(148,125,255,0.18)]">
+          <div className="relative flex-1 flex items-center bg-surface-container-highest/70 rounded-xl px-space-md py-2.5 shadow-[0_0_0_1px_rgba(252,211,77,0.4),0_0_18px_rgba(245,158,11,0.18)]">
             <Icon name="manage_search" className="text-primary text-[20px] mr-space-sm" />
             <input
               ref={input}
