@@ -71,3 +71,26 @@ body { margin: 0; background: var(--bg); color: var(--text); -webkit-font-smooth
 .ocr-placeholder { margin: 0; color: var(--muted); font-size: 13px; }
 .lightbox-inner { max-height: 100vh; overflow: auto; }
 .lightbox-inner img { max-height: 58vh; }
+
+/* Session names: title + muted date/time, inline rename */
+.name-input { width: min(100%, 360px); background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+  padding: 12px 16px; color: var(--text); font: inherit; font-size: 14px; text-align: center;
+  transition: border-color .15s ease, box-shadow .15s ease; }
+.name-input::placeholder { color: #5c616d; }
+.name-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(110, 139, 255, 0.15); }
+.name-input:disabled { opacity: .5; }
+.session-title { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.capture .session-title { align-items: center; text-align: center; }
+.session-title.editing .name-input { text-align: left; padding: 8px 12px; width: 320px; }
+.capture .session-title.editing .name-input { text-align: center; }
+.title-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.session-title .title { margin: 0; font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-title .title.large { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+.when-sub { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.icon-btn { all: unset; display: inline-flex; padding: 4px; border-radius: 6px; color: var(--muted); cursor: pointer;
+  opacity: 0; transition: opacity .15s ease, color .15s ease, background .15s ease; }
+.session-title:hover .icon-btn, .icon-btn:focus-visible { opacity: 1; }
+.icon-btn:hover { color: var(--text); background: var(--border); }
+.icon-btn:focus-visible { outline: 2px solid var(--accent); }
+.history li { align-items: center; gap: 16px; }
+.history li .meta { flex-shrink: 0; }

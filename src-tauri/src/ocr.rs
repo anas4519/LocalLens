@@ -268,7 +268,7 @@ mod tests {
         std::fs::write(data_dir.join("frames/1/empty.bin"), b"EMPTY").unwrap();
 
         let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
-        let sid = db.lock().unwrap().start_session().unwrap().id;
+        let sid = db.lock().unwrap().start_session(None).unwrap().id;
         let ok = db
             .lock()
             .unwrap()

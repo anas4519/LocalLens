@@ -69,16 +69,28 @@ fn capture_status(state: State<AppState>) -> Result<Status, String> {
     })
 }
 
+/// `name` is optional: JS can omit it, pass null, or pass "" (all mean unnamed).
 #[tauri::command]
-fn start_session(state: State<AppState>) -> Result<Session, String> {
+fn start_session(state: State<AppState>, name: Option<String>) -> Result<Session, String> {
+    let name = name.as_deref();
     let mut recorder = state.recorder.lock().map_err(err)?;
     if recorder.is_some() {
-        return state.db.lock().map_err(err)?.start_session().map_err(err);
+        return state
+            .db
+            .lock()
+            .map_err(err)?
+            .start_session(name)
+            .map_err(err);
     }
     // Check permission *before* creating a session, so a denied start leaves no empty row.
     let mut capturer = capture::platform_capturer();
     capturer.start().map_err(err)?;
-    let session = state.db.lock().map_err(err)?.start_session().map_err(err)?;
+    let session = state
+        .db
+        .lock()
+        .map_err(err)?
+        .start_session(name)
+        .map_err(err)?;
 
     let frames_dir = state.data_dir.join("frames").join(session.id.to_string());
     std::fs::create_dir_all(&frames_dir).map_err(err)?;
@@ -148,6 +160,22 @@ fn stop_session(state: State<AppState>) -> Result<Session, String> {
         .ok_or_else(|| "no active session".to_string())
 }
 
+/// Name, rename, or clear (null / blank) the name of any session, past or running.
+#[tauri::command]
+fn rename_session(
+    state: State<AppState>,
+    id: i64,
+    name: Option<String>,
+) -> Result<Session, String> {
+    state
+        .db
+        .lock()
+        .map_err(err)?
+        .rename_session(id, name.as_deref())
+        .map_err(err)?
+        .ok_or_else(|| format!("no session with id {id}"))
+}
+
 #[tauri::command]
 fn list_sessions(state: State<AppState>) -> Result<Vec<Session>, String> {
     state.db.lock().map_err(err)?.list_sessions().map_err(err)
@@ -198,6 +226,7 @@ pub fn run() {
             start_session,
             stop_session,
             list_sessions,
+            rename_session,
             capture_status,
             list_frames
         ])

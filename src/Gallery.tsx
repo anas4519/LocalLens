@@ -1,5 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import SessionTitle from "./SessionTitle";
 import { FrameRow, OCR_FAILED, OCR_PENDING, Session, listFrames } from "./api";
 
 const fmtTime = (ts: number) =>
@@ -60,7 +61,15 @@ function OcrPanel({ frame }: { frame: FrameRow }) {
   );
 }
 
-export default function Gallery({ session, onBack }: { session: Session; onBack: () => void }) {
+export default function Gallery({
+  session,
+  onBack,
+  onRenamed,
+}: {
+  session: Session;
+  onBack: () => void;
+  onRenamed: (s: Session) => void;
+}) {
   const [frames, setFrames] = useState<FrameRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<number | null>(null);
@@ -111,7 +120,7 @@ export default function Gallery({ session, onBack }: { session: Session; onBack:
           ← Sessions
         </button>
         <div>
-          <h1>{new Date(session.started_at).toLocaleString()}</h1>
+          <SessionTitle session={session} onRenamed={onRenamed} as="h1" />
           <p className="tagline">
             {frames
               ? `${count} ${count === 1 ? "frame" : "frames"}${pending > 0 ? ` · OCR: ${pending} pending` : ""}`

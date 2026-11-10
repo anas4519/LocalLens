@@ -11,6 +11,24 @@ pub const OCR_PENDING: i64 = 0;
 pub const OCR_DONE: i64 = 1;
 pub const OCR_FAILED: i64 = 2;
 
+/// Longest session name we store, in characters (not bytes, so emoji/Hindi are safe).
+pub const MAX_SESSION_NAME: usize = 80;
+
+/// Trim, treat blank as "no name", and cap the length. Used for start and rename.
+pub fn normalize_name(name: Option<&str>) -> Option<String> {
+    let t = name?.trim();
+    if t.is_empty() {
+        return None;
+    }
+    Some(
+        t.chars()
+            .take(MAX_SESSION_NAME)
+            .collect::<String>()
+            .trim_end()
+            .to_string(),
+    )
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct FrameRow {
     pub id: i64,
@@ -25,6 +43,8 @@ pub struct FrameRow {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Session {
     pub id: i64,
+    /// Optional user label; the UI falls back to the start date + time.
+    pub name: Option<String>,
     pub started_at: i64,
     pub ended_at: Option<i64>,
     pub frame_count: i64,
@@ -34,7 +54,8 @@ const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at  INTEGER NOT NULL,
-    ended_at    INTEGER
+    ended_at    INTEGER,
+    name        TEXT               -- nullable: unnamed sessions show date + time
 );
 CREATE TABLE IF NOT EXISTS frames (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,9 +93,14 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Resu
     Ok(false)
 }
 
-/// Add `ocr_status` to databases created before this column existed, and
-/// classify already-stored rows so we don't re-OCR finished work.
+/// Bring databases created by older builds up to the current schema.
+/// Each step is idempotent (checks before it alters), so it is safe on every launch.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    // v0.3: optional session name. Existing rows get NULL = unnamed.
+    if !column_exists(conn, "sessions", "name")? {
+        conn.execute_batch("ALTER TABLE sessions ADD COLUMN name TEXT;")?;
+    }
+    // v0.2: `ocr_status`, and classify already-stored rows so we don't re-OCR finished work.
     if !column_exists(conn, "frames", "ocr_status")? {
         conn.execute_batch("ALTER TABLE frames ADD COLUMN ocr_status INTEGER NOT NULL DEFAULT 0;")?;
     }
@@ -120,7 +146,7 @@ impl Db {
     pub fn active_session(&self) -> rusqlite::Result<Option<Session>> {
         self.conn
             .query_row(
-                "SELECT s.id, s.started_at, s.ended_at, (SELECT COUNT(*) FROM frames f WHERE f.session_id = s.id)
+                "SELECT s.id, s.name, s.started_at, s.ended_at, (SELECT COUNT(*) FROM frames f WHERE f.session_id = s.id)
                  FROM sessions s WHERE s.ended_at IS NULL ORDER BY s.id DESC LIMIT 1",
                 [],
                 row_to_session,
@@ -128,16 +154,28 @@ impl Db {
             .optional()
     }
 
-    /// Starts a session, or returns the one already running.
-    pub fn start_session(&self) -> rusqlite::Result<Session> {
+    /// Starts a session, or returns the one already running (its name is left as is).
+    pub fn start_session(&self, name: Option<&str>) -> rusqlite::Result<Session> {
         if let Some(s) = self.active_session()? {
             return Ok(s);
         }
         self.conn.execute(
-            "INSERT INTO sessions (started_at) VALUES (?1)",
-            params![now_ms()],
+            "INSERT INTO sessions (started_at, name) VALUES (?1, ?2)",
+            params![now_ms(), normalize_name(name)],
         )?;
         self.get(self.conn.last_insert_rowid())
+    }
+
+    /// Set, change, or clear (None / blank) a session's name. Ok(None) if no such session.
+    pub fn rename_session(&self, id: i64, name: Option<&str>) -> rusqlite::Result<Option<Session>> {
+        let changed = self.conn.execute(
+            "UPDATE sessions SET name = ?1 WHERE id = ?2",
+            params![normalize_name(name), id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get(id).map(Some)
     }
 
     pub fn stop_session(&self) -> rusqlite::Result<Option<Session>> {
@@ -153,7 +191,7 @@ impl Db {
 
     pub fn list_sessions(&self) -> rusqlite::Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT s.id, s.started_at, s.ended_at, (SELECT COUNT(*) FROM frames f WHERE f.session_id = s.id)
+            "SELECT s.id, s.name, s.started_at, s.ended_at, (SELECT COUNT(*) FROM frames f WHERE f.session_id = s.id)
              FROM sessions s ORDER BY s.started_at DESC",
         )?;
         let rows = stmt.query_map([], row_to_session)?;
@@ -247,7 +285,7 @@ impl Db {
 
     fn get(&self, id: i64) -> rusqlite::Result<Session> {
         self.conn.query_row(
-            "SELECT s.id, s.started_at, s.ended_at, (SELECT COUNT(*) FROM frames f WHERE f.session_id = s.id)
+            "SELECT s.id, s.name, s.started_at, s.ended_at, (SELECT COUNT(*) FROM frames f WHERE f.session_id = s.id)
              FROM sessions s WHERE s.id = ?1",
             [id],
             row_to_session,
@@ -258,9 +296,10 @@ impl Db {
 fn row_to_session(r: &rusqlite::Row) -> rusqlite::Result<Session> {
     Ok(Session {
         id: r.get(0)?,
-        started_at: r.get(1)?,
-        ended_at: r.get(2)?,
-        frame_count: r.get(3)?,
+        name: r.get(1)?,
+        started_at: r.get(2)?,
+        ended_at: r.get(3)?,
+        frame_count: r.get(4)?,
     })
 }
 
@@ -271,10 +310,10 @@ mod tests {
     #[test]
     fn session_start_stop_round_trip() {
         let db = Db::open_in_memory().unwrap();
-        let s = db.start_session().unwrap();
+        let s = db.start_session(None).unwrap();
         assert!(s.ended_at.is_none());
         // Starting again returns the same active session.
-        assert_eq!(db.start_session().unwrap().id, s.id);
+        assert_eq!(db.start_session(None).unwrap().id, s.id);
 
         let stopped = db.stop_session().unwrap().expect("active session");
         assert_eq!(stopped.id, s.id);
@@ -288,12 +327,74 @@ mod tests {
     }
 
     #[test]
+    fn normalize_name_trims_blanks_and_caps() {
+        assert_eq!(normalize_name(None), None);
+        assert_eq!(normalize_name(Some("")), None);
+        assert_eq!(normalize_name(Some("   \t\n ")), None);
+        assert_eq!(
+            normalize_name(Some("  Spring retry  ")).as_deref(),
+            Some("Spring retry")
+        );
+        let long = "é".repeat(200); // multi-byte: must cut on a char boundary
+        let n = normalize_name(Some(&long)).unwrap();
+        assert_eq!(n.chars().count(), MAX_SESSION_NAME);
+        // A cut that lands on a space doesn't leave trailing whitespace.
+        let spaced = format!("{} tail", "a".repeat(MAX_SESSION_NAME - 1));
+        assert_eq!(
+            normalize_name(Some(&spaced)).unwrap(),
+            "a".repeat(MAX_SESSION_NAME - 1)
+        );
+    }
+
+    #[test]
+    fn start_session_stores_normalized_name() {
+        let db = Db::open_in_memory().unwrap();
+        let s = db.start_session(Some("  Standup notes ")).unwrap();
+        assert_eq!(s.name.as_deref(), Some("Standup notes"));
+        // Already running: returns it unchanged, ignoring the new name.
+        assert_eq!(
+            db.start_session(Some("other")).unwrap().name.as_deref(),
+            Some("Standup notes")
+        );
+        db.stop_session().unwrap();
+        assert_eq!(db.start_session(Some("   ")).unwrap().name, None);
+    }
+
+    #[test]
+    fn rename_sets_changes_and_clears() {
+        let db = Db::open_in_memory().unwrap();
+        let s = db.start_session(None).unwrap();
+        db.stop_session().unwrap();
+        let r = db
+            .rename_session(s.id, Some(" Design review "))
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.name.as_deref(), Some("Design review"));
+        assert_eq!(r.started_at, s.started_at); // date + time untouched
+        let r = db.rename_session(s.id, Some("Retro")).unwrap().unwrap();
+        assert_eq!(r.name.as_deref(), Some("Retro"));
+        assert_eq!(
+            db.list_sessions().unwrap()[0].name.as_deref(),
+            Some("Retro")
+        );
+        assert_eq!(
+            db.rename_session(s.id, Some("")).unwrap().unwrap().name,
+            None
+        );
+        assert_eq!(db.rename_session(s.id, None).unwrap().unwrap().name, None);
+        assert!(db.rename_session(9999, Some("x")).unwrap().is_none());
+    }
+
+    #[test]
     fn list_frames_is_ordered_and_keeps_pruned() {
         let db = Db::open_in_memory().unwrap();
-        let s = db.start_session().unwrap();
+        let s = db.start_session(None).unwrap();
         db.add_frame(s.id, 20, Some("frames/1/20.jpg"), "").unwrap();
         db.add_frame(s.id, 10, None, "old").unwrap();
-        let other = db.stop_session().and_then(|_| db.start_session()).unwrap();
+        let other = db
+            .stop_session()
+            .and_then(|_| db.start_session(None))
+            .unwrap();
         db.add_frame(other.id, 5, None, "").unwrap();
         let f = db.list_frames(s.id).unwrap();
         assert_eq!(f.iter().map(|f| f.ts).collect::<Vec<_>>(), vec![10, 20]);
@@ -304,7 +405,7 @@ mod tests {
     #[test]
     fn fts_finds_frame_text() {
         let db = Db::open_in_memory().unwrap();
-        let s = db.start_session().unwrap();
+        let s = db.start_session(None).unwrap();
         let f = db
             .add_frame(s.id, 1, None, "spring retry config maxAttempts")
             .unwrap();
@@ -354,6 +455,26 @@ mod tests {
         }
 
         let db = Db::open(&path).unwrap();
+        // Old sessions survive the `name` migration as unnamed, and can be named.
+        let sessions = db.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, None);
+        assert_eq!(sessions[0].started_at, 1);
+        assert_eq!(
+            db.rename_session(1, Some("legacy"))
+                .unwrap()
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("legacy")
+        );
+        drop(db);
+        // Re-opening an already-migrated db is a no-op (no "duplicate column" error).
+        let db = Db::open(&path).unwrap();
+        assert_eq!(
+            db.list_sessions().unwrap()[0].name.as_deref(),
+            Some("legacy")
+        );
         let rows = db.list_frames(1).unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].ocr_status, OCR_PENDING); // has image, empty text
@@ -366,7 +487,7 @@ mod tests {
             .unwrap();
         assert_eq!(db.search("hello").unwrap()[0].0, rows[0].id);
         // The UPDATE OF ocr_text trigger refreshed FTS (not a stale empty doc).
-        assert!(db.search("hello").unwrap().len() >= 1);
+        assert!(!db.search("hello").unwrap().is_empty());
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));

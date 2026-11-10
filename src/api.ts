@@ -2,12 +2,18 @@ import { invoke } from "@tauri-apps/api/core";
 
 export interface Session {
   id: number;
+  name: string | null; // null = unnamed; UI shows date + time either way
   started_at: number; // unix ms
   ended_at: number | null;
   frame_count: number;
 }
 
-export const startSession = () => invoke<Session>("start_session");
+export const MAX_SESSION_NAME = 80; // mirrors db::MAX_SESSION_NAME
+
+export const startSession = (name?: string | null) =>
+  invoke<Session>("start_session", { name: name?.trim() || null });
+export const renameSession = (id: number, name: string | null) =>
+  invoke<Session>("rename_session", { id, name });
 export const stopSession = () => invoke<Session>("stop_session");
 export const listSessions = () => invoke<Session[]>("list_sessions");
 

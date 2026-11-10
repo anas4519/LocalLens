@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Gallery from "./Gallery";
-import { Session, captureStatus, listSessions, startSession, stopSession } from "./api";
+import SessionTitle from "./SessionTitle";
+import { MAX_SESSION_NAME, Session, captureStatus, listSessions, startSession, stopSession } from "./api";
 
 function fmtDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -21,6 +22,7 @@ export default function App() {
   const [viewing, setViewing] = useState<Session | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [ocrPending, setOcrPending] = useState(0);
+  const [newName, setNewName] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -66,7 +68,10 @@ export default function App() {
     setError(null);
     try {
       if (active) await stopSession();
-      else await startSession();
+      else {
+        await startSession(newName);
+        setNewName("");
+      }
       setNow(Date.now());
       await refresh();
     } catch (e) {
@@ -78,7 +83,14 @@ export default function App() {
 
   const past = sessions.filter((s) => s.ended_at !== null);
 
-  if (viewing) return <Gallery session={viewing} onBack={() => setViewing(null)} />;
+  // One place to apply a rename result, wherever it came from (list, gallery, active card).
+  const applyRename = (s: Session) => {
+    setSessions((all) => all.map((x) => (x.id === s.id ? s : x)));
+    setActive((a) => (a && a.id === s.id ? s : a));
+    setViewing((v) => (v && v.id === s.id ? s : v));
+  };
+
+  if (viewing) return <Gallery session={viewing} onBack={() => setViewing(null)} onRenamed={applyRename} />;
 
   return (
     <main className="app">
@@ -101,6 +113,20 @@ export default function App() {
         <div className={`timer ${active ? "live" : ""}`}>
           {active ? fmtDuration(now - active.started_at) : "00:00"}
         </div>
+        {active ? (
+          <SessionTitle session={active} onRenamed={applyRename} />
+        ) : (
+          <input
+            className="name-input"
+            value={newName}
+            maxLength={MAX_SESSION_NAME}
+            placeholder="Session name (optional)"
+            disabled={busy}
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && !busy && toggle()}
+            aria-label="Session name (optional)"
+          />
+        )}
         <button className={`primary ${active ? "stop" : "start"}`} onClick={toggle} disabled={busy}>
           {active ? "Stop session" : "Start session"}
         </button>
@@ -120,7 +146,7 @@ export default function App() {
           <ul>
             {past.map((s) => (
               <li key={s.id} className="clickable" onClick={() => setViewing(s)}>
-                <span className="when">{new Date(s.started_at).toLocaleString()}</span>
+                <SessionTitle session={s} onRenamed={applyRename} />
                 <span className="meta">
                   {fmtDuration((s.ended_at ?? s.started_at) - s.started_at)} · {s.frame_count} frames
                 </span>
