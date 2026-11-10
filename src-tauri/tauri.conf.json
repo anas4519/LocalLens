@@ -13,11 +13,17 @@
     "windows": [
       {
         "title": "LocalLens",
-        "width": 720,
-        "height": 760,
-        "minWidth": 520,
-        "minHeight": 560,
-        "theme": "Dark"
+        "width": 1280,
+        "height": 820,
+        "minWidth": 1024,
+        "minHeight": 680,
+        "theme": "Dark",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 18,
+          "y": 24
+        }
       }
     ],
     "security": {
