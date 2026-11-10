@@ -39,3 +39,22 @@ export interface FrameRow {
 }
 
 export const listFrames = (sessionId: number) => invoke<FrameRow[]>("list_frames", { sessionId });
+
+/** One run of snippet text; `hit` runs are the matched words. Rendered as text, never as HTML. */
+export interface SnippetPart {
+  text: string;
+  hit: boolean;
+}
+
+export interface SearchHit {
+  frame_id: number;
+  session_id: number;
+  session_name: string | null;
+  session_started_at: number; // unix ms
+  ts: number; // unix ms, when the frame was captured
+  image_path: string | null; // absolute; null when pruned
+  snippet: SnippetPart[];
+}
+
+export const search = (query: string, limit?: number) =>
+  invoke<SearchHit[]>("search", { query, limit: limit ?? null });

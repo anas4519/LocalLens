@@ -2,9 +2,9 @@ mod capture;
 mod db;
 mod ocr;
 
-use db::{Db, FrameRow, Session};
+use db::{Db, FrameRow, SearchHit, Session};
 use ocr::OcrWorker;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -192,14 +192,37 @@ fn list_frames(state: State<AppState>, session_id: i64) -> Result<Vec<FrameRow>,
         .list_frames(session_id)
         .map_err(err)?;
     for f in &mut frames {
-        f.image_path = f
-            .image_path
-            .take()
-            .map(|p| state.data_dir.join(p))
-            .filter(|p| p.exists()) // pruned or deleted file -> placeholder
-            .map(|p| p.to_string_lossy().into_owned());
+        f.image_path = resolve_image(&state.data_dir, f.image_path.take());
     }
     Ok(frames)
+}
+
+/// Relative db path -> absolute path the asset protocol can serve, or None if the image
+/// was pruned or the file is gone (the UI shows a placeholder).
+fn resolve_image(data_dir: &Path, rel: Option<String>) -> Option<String> {
+    rel.map(|p| data_dir.join(p))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Full-text search over OCR text. Blank `query` -> empty list; `limit` defaults to 30, max 100.
+#[tauri::command]
+fn search(
+    state: State<AppState>,
+    query: String,
+    limit: Option<u32>,
+) -> Result<Vec<SearchHit>, String> {
+    // The lock is released at the end of this statement, before we touch the disk.
+    let mut hits = state
+        .db
+        .lock()
+        .map_err(err)?
+        .search(&query, limit)
+        .map_err(err)?;
+    for h in &mut hits {
+        h.image_path = resolve_image(&state.data_dir, h.image_path.take());
+    }
+    Ok(hits)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -228,7 +251,8 @@ pub fn run() {
             list_sessions,
             rename_session,
             capture_status,
-            list_frames
+            list_frames,
+            search
         ])
         .run(tauri::generate_context!())
         .expect("error while running LocalLens");

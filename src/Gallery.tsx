@@ -1,12 +1,12 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import SessionTitle from "./SessionTitle";
 import { FrameRow, OCR_FAILED, OCR_PENDING, Session, listFrames } from "./api";
 
-const fmtTime = (ts: number) =>
+export const fmtTime = (ts: number) =>
   new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
-function Placeholder({ large = false }: { large?: boolean }) {
+export function Placeholder({ large = false }: { large?: boolean }) {
   return (
     <div className={`placeholder ${large ? "large" : ""}`}>
       <svg viewBox="0 0 24 24" width={large ? 36 : 22} height={large ? 36 : 22} aria-hidden>
@@ -65,14 +65,18 @@ export default function Gallery({
   session,
   onBack,
   onRenamed,
+  initialFrameId = null,
 }: {
   session: Session;
   onBack: () => void;
   onRenamed: (s: Session) => void;
+  /** Open the lightbox on this frame once frames load (used by search results). */
+  initialFrameId?: number | null;
 }) {
   const [frames, setFrames] = useState<FrameRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<number | null>(null);
+  const jumpTo = useRef(initialFrameId); // consumed once, so later refreshes don't re-open it
 
   const refreshFrames = useCallback(() => {
     listFrames(session.id).then(setFrames).catch((e) => setError(String(e)));
@@ -81,6 +85,13 @@ export default function Gallery({
   useEffect(() => {
     refreshFrames();
   }, [refreshFrames]);
+
+  useEffect(() => {
+    if (!frames || jumpTo.current === null) return;
+    const i = frames.findIndex((f) => f.id === jumpTo.current);
+    jumpTo.current = null;
+    if (i >= 0) setOpen(i);
+  }, [frames]);
 
   const pending = frames?.filter((f) => f.ocr_status === OCR_PENDING).length ?? 0;
 

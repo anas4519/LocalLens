@@ -321,15 +321,19 @@ mod tests {
         assert_eq!(get(empty).ocr_text, "");
         assert_eq!(get(pruned).ocr_status, OCR_DONE);
 
-        let hits = db.lock().unwrap().search("alpha").unwrap();
-        assert_eq!(hits, vec![(ok, sid, 1)]);
+        let hits = db.lock().unwrap().search("alpha", None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            (hits[0].frame_id, hits[0].session_id, hits[0].ts),
+            (ok, sid, 1)
+        );
         assert!(db
             .lock()
             .unwrap()
-            .search("beta")
+            .search("beta", None)
             .unwrap()
             .iter()
-            .any(|h| h.0 == later));
+            .any(|h| h.frame_id == later));
 
         let _ = std::fs::remove_dir_all(data_dir);
     }

@@ -1,7 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import Gallery from "./Gallery";
+import Search from "./Search";
 import SessionTitle from "./SessionTitle";
-import { MAX_SESSION_NAME, Session, captureStatus, listSessions, startSession, stopSession } from "./api";
+import {
+  MAX_SESSION_NAME,
+  SearchHit,
+  Session,
+  captureStatus,
+  listSessions,
+  startSession,
+  stopSession,
+} from "./api";
 
 function fmtDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -23,6 +32,8 @@ export default function App() {
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [ocrPending, setOcrPending] = useState(0);
   const [newName, setNewName] = useState("");
+  const [query, setQuery] = useState("");
+  const [jumpFrame, setJumpFrame] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -90,7 +101,37 @@ export default function App() {
     setViewing((v) => (v && v.id === s.id ? s : v));
   };
 
-  if (viewing) return <Gallery session={viewing} onBack={() => setViewing(null)} onRenamed={applyRename} />;
+  const openSession = (s: Session) => {
+    setJumpFrame(null);
+    setViewing(s);
+  };
+
+  // A search hit only carries the session id; get the full session (refetch if it's new).
+  const openHit = async (h: SearchHit) => {
+    try {
+      let s = sessions.find((x) => x.id === h.session_id);
+      if (!s) {
+        const all = await listSessions();
+        setSessions(all);
+        s = all.find((x) => x.id === h.session_id);
+      }
+      if (!s) return setError("That session no longer exists.");
+      setJumpFrame(h.frame_id);
+      setViewing(s);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  if (viewing)
+    return (
+      <Gallery
+        session={viewing}
+        initialFrameId={jumpFrame}
+        onBack={() => setViewing(null)}
+        onRenamed={applyRename}
+      />
+    );
 
   return (
     <main className="app">
@@ -98,6 +139,8 @@ export default function App() {
         <h1>LocalLens</h1>
         <p className="tagline">Private memory for the sessions you choose. Nothing leaves this Mac.</p>
       </header>
+
+      <Search query={query} onQueryChange={setQuery} onOpen={openHit} />
 
       {!hasPermission && (
         <section className="notice">
@@ -145,7 +188,7 @@ export default function App() {
         ) : (
           <ul>
             {past.map((s) => (
-              <li key={s.id} className="clickable" onClick={() => setViewing(s)}>
+              <li key={s.id} className="clickable" onClick={() => openSession(s)}>
                 <SessionTitle session={s} onRenamed={applyRename} />
                 <span className="meta">
                   {fmtDuration((s.ended_at ?? s.started_at) - s.started_at)} · {s.frame_count} frames

@@ -50,6 +50,81 @@ pub struct Session {
     pub frame_count: i64,
 }
 
+/// Results per search when the caller doesn't say, and the most we ever return.
+pub const SEARCH_DEFAULT_LIMIT: u32 = 30;
+pub const SEARCH_MAX_LIMIT: u32 = 100;
+
+// FTS5's snippet() wraps every hit in these. They're Unicode private-use code points, so
+// real OCR text practically never contains them, and they never reach the UI as markup:
+// `parse_snippet` turns them into structured parts that React renders as plain text.
+const HIT_START: char = '\u{E000}';
+const HIT_END: char = '\u{E001}';
+
+/// Turn whatever the user typed into a safe FTS5 MATCH expression, or None if there's
+/// nothing to search for. Every word becomes a quoted string (inner `"` doubled), so
+/// `-`, `:`, `*`, `(`, `AND`, `OR`, `NEAR` are matched as plain text, never parsed as
+/// query syntax. Words are implicitly AND-ed, and the last one gets `*` so a half-typed
+/// word ("deplo") matches its completions ("deploy"). Pure punctuation is dropped,
+/// since the tokenizer would ignore it anyway.
+pub fn build_fts_query(input: &str) -> Option<String> {
+    let tokens: Vec<String> = input
+        .split_whitespace()
+        .filter(|t| t.chars().any(char::is_alphanumeric))
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    Some(format!("{}*", tokens.join(" ")))
+}
+
+/// One run of snippet text; `hit` = this run matched the query (render as `<mark>`).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SnippetPart {
+    pub text: String,
+    pub hit: bool,
+}
+
+/// Split a raw FTS5 snippet at the HIT_START / HIT_END sentinels.
+pub fn parse_snippet(raw: &str) -> Vec<SnippetPart> {
+    let mut parts = Vec::new();
+    let mut buf = String::new();
+    let mut hit = false;
+    for c in raw.chars() {
+        let next = match c {
+            HIT_START => true,
+            HIT_END => false,
+            _ => {
+                buf.push(c);
+                continue;
+            }
+        };
+        if !buf.is_empty() {
+            parts.push(SnippetPart {
+                text: std::mem::take(&mut buf),
+                hit,
+            });
+        }
+        hit = next;
+    }
+    if !buf.is_empty() {
+        parts.push(SnippetPart { text: buf, hit });
+    }
+    parts
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SearchHit {
+    pub frame_id: i64,
+    pub session_id: i64,
+    pub session_name: Option<String>,
+    pub session_started_at: i64,
+    pub ts: i64,
+    /// Relative here; the `search` command makes it absolute. None once pruned.
+    pub image_path: Option<String>,
+    pub snippet: Vec<SnippetPart>,
+}
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -255,14 +330,38 @@ impl Db {
         )
     }
 
-    /// Full-text search over OCR text; returns (frame_id, session_id, ts).
-    #[allow(dead_code)]
-    pub fn search(&self, query: &str) -> rusqlite::Result<Vec<(i64, i64, i64)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT f.id, f.session_id, f.ts FROM frames_fts JOIN frames f ON f.id = frames_fts.rowid
-             WHERE frames_fts MATCH ?1 ORDER BY rank",
-        )?;
-        let rows = stmt.query_map([query], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    /// Full-text search over OCR text, best match first.
+    /// `bm25()` is a relevance score where *lower is better* (rarer words, more hits and
+    /// shorter text score lower), so it sorts ascending; ties go to the newer frame.
+    pub fn search(&self, query: &str, limit: Option<u32>) -> rusqlite::Result<Vec<SearchHit>> {
+        let Some(fts) = build_fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let limit = limit
+            .unwrap_or(SEARCH_DEFAULT_LIMIT)
+            .clamp(1, SEARCH_MAX_LIMIT);
+        let sql = format!(
+            "SELECT f.id, f.session_id, s.name, s.started_at, f.ts, f.image_path,
+                    snippet(frames_fts, 0, '{HIT_START}', '{HIT_END}', '…', 12)
+             FROM frames_fts
+             JOIN frames f ON f.id = frames_fts.rowid
+             JOIN sessions s ON s.id = f.session_id
+             WHERE frames_fts MATCH ?1 AND f.ocr_status = ?2 AND f.ocr_text != ''
+             ORDER BY bm25(frames_fts) ASC, f.ts DESC
+             LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![fts, OCR_DONE, limit], |r| {
+            Ok(SearchHit {
+                frame_id: r.get(0)?,
+                session_id: r.get(1)?,
+                session_name: r.get(2)?,
+                session_started_at: r.get(3)?,
+                ts: r.get(4)?,
+                image_path: r.get(5)?,
+                snippet: parse_snippet(&r.get::<_, String>(6)?),
+            })
+        })?;
         rows.collect()
     }
 
@@ -411,8 +510,210 @@ mod tests {
             .unwrap();
         db.add_frame(s.id, 2, Some("frames/2.png"), "unrelated")
             .unwrap();
-        let hits = db.search("retry").unwrap();
-        assert_eq!(hits, vec![(f, s.id, 1)]);
+        let hits = db.search("retry", None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            (hits[0].frame_id, hits[0].session_id, hits[0].ts),
+            (f, s.id, 1)
+        );
+    }
+
+    #[test]
+    fn build_fts_query_quotes_every_token() {
+        assert_eq!(build_fts_query(""), None);
+        assert_eq!(build_fts_query("   \t\n"), None);
+        assert_eq!(build_fts_query("- : * ()"), None); // nothing searchable
+        assert_eq!(build_fts_query("deplo").as_deref(), Some(r#""deplo"*"#));
+        assert_eq!(
+            build_fts_query("  spring   retry ").as_deref(),
+            Some(r#""spring" "retry"*"#)
+        );
+        // Operators and syntax characters become literal text.
+        assert_eq!(
+            build_fts_query("foo AND bar OR NEAR(x) -baz col:val").as_deref(),
+            Some(r#""foo" "AND" "bar" "OR" "NEAR(x)" "-baz" "col:val"*"#)
+        );
+        assert_eq!(
+            build_fts_query("pre-commit").as_deref(),
+            Some(r#""pre-commit"*"#)
+        );
+        // Inner quotes are doubled, so a stray `"` can't end the string early.
+        assert_eq!(
+            build_fts_query(r#"say "hi" o"k"#).as_deref(),
+            Some(r#""say" """hi""" "o""k"*"#)
+        );
+        assert_eq!(
+            build_fts_query("Grüße नमस्ते 東京").as_deref(),
+            Some(r#""Grüße" "नमस्ते" "東京"*"#)
+        );
+    }
+
+    #[test]
+    fn parse_snippet_splits_on_markers() {
+        let raw = format!("a {HIT_START}deploy{HIT_END} b <i>{HIT_START}x{HIT_END}");
+        let parts = parse_snippet(&raw);
+        let got: Vec<_> = parts.iter().map(|p| (p.text.as_str(), p.hit)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("a ", false),
+                ("deploy", true),
+                (" b <i>", false),
+                ("x", true)
+            ]
+        );
+        assert!(parse_snippet("").is_empty());
+    }
+
+    #[test]
+    fn search_ranks_denser_shorter_matches_first() {
+        let db = Db::open_in_memory().unwrap();
+        let s = db.start_session(None).unwrap();
+        let long = db
+            .add_frame(
+                s.id,
+                1,
+                None,
+                "a long page of notes where kubernetes is mentioned once among many many other words about lunch",
+            )
+            .unwrap();
+        let dense = db
+            .add_frame(s.id, 2, None, "kubernetes kubernetes kubernetes")
+            .unwrap();
+        db.add_frame(s.id, 3, None, "nothing relevant here")
+            .unwrap();
+        let ids: Vec<_> = db
+            .search("kubernetes", None)
+            .unwrap()
+            .iter()
+            .map(|h| h.frame_id)
+            .collect();
+        assert_eq!(ids, vec![dense, long]);
+    }
+
+    #[test]
+    fn search_prefix_multiword_and_snippet() {
+        let db = Db::open_in_memory().unwrap();
+        let s = db.start_session(Some("Release day")).unwrap();
+        let f = db
+            .add_frame(
+                s.id,
+                7,
+                Some("frames/1/7.jpg"),
+                "run the deploy script <b>now</b> & check logs",
+            )
+            .unwrap();
+        db.add_frame(s.id, 8, None, "deploy only").unwrap();
+
+        let hits = db.search("deplo", None).unwrap(); // half-typed word
+        assert_eq!(hits.len(), 2);
+        let hits = db.search("script deplo", None).unwrap(); // words AND-ed, any order
+        assert_eq!(hits.len(), 1);
+        let h = &hits[0];
+        assert_eq!(h.frame_id, f);
+        assert_eq!(h.session_id, s.id);
+        assert_eq!(h.session_name.as_deref(), Some("Release day"));
+        assert_eq!(h.session_started_at, s.started_at);
+        assert_eq!(h.ts, 7);
+        assert_eq!(h.image_path.as_deref(), Some("frames/1/7.jpg"));
+        let marked: Vec<_> = h
+            .snippet
+            .iter()
+            .filter(|p| p.hit)
+            .map(|p| p.text.as_str())
+            .collect();
+        assert_eq!(marked, vec!["deploy", "script"]);
+        // Raw `<b>` from OCR stays plain text inside a non-hit part, no sentinels leak.
+        let all: String = h.snippet.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(all, "run the deploy script <b>now</b> & check logs");
+        assert!(!all.contains(HIT_START) && !all.contains(HIT_END));
+    }
+
+    #[test]
+    fn search_returns_pruned_frames_and_skips_unfinished_ocr() {
+        let db = Db::open_in_memory().unwrap();
+        let s = db.start_session(None).unwrap();
+        let pruned = db.add_frame(s.id, 1, None, "invoice total 420").unwrap();
+        let pending = db.add_frame(s.id, 2, Some("frames/1/2.jpg"), "").unwrap();
+        let failed = db.add_frame(s.id, 3, Some("frames/1/3.jpg"), "").unwrap();
+        db.set_ocr_result(failed, "invoice draft", OCR_FAILED)
+            .unwrap();
+        // Text written but status still pending (shouldn't happen, but don't show it).
+        db.conn
+            .execute(
+                "UPDATE frames SET ocr_text = 'invoice pending' WHERE id = ?1",
+                [pending],
+            )
+            .unwrap();
+
+        let hits = db.search("invoice", None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].frame_id, pruned);
+        assert_eq!(hits[0].image_path, None);
+        assert_eq!(hits[0].session_name, None);
+    }
+
+    #[test]
+    fn search_limits_and_blank_and_hostile_input() {
+        let db = Db::open_in_memory().unwrap();
+        let s = db.start_session(None).unwrap();
+        for ts in 0..120 {
+            db.add_frame(s.id, ts, None, "same words every time")
+                .unwrap();
+        }
+        assert_eq!(
+            db.search("words", None).unwrap().len(),
+            SEARCH_DEFAULT_LIMIT as usize
+        );
+        assert_eq!(db.search("words", Some(5)).unwrap().len(), 5);
+        assert_eq!(db.search("words", Some(0)).unwrap().len(), 1);
+        assert_eq!(
+            db.search("words", Some(10_000)).unwrap().len(),
+            SEARCH_MAX_LIMIT as usize
+        );
+        // Equal scores: newest first.
+        assert_eq!(db.search("words", Some(1)).unwrap()[0].ts, 119);
+
+        assert!(db.search("", None).unwrap().is_empty());
+        assert!(db.search("   ", None).unwrap().is_empty());
+        for nasty in [
+            "\"",
+            "\"\"\"",
+            "words\"",
+            "*",
+            "words*",
+            "AND",
+            "OR words",
+            "NOT words",
+            "NEAR(words every)",
+            "words -time",
+            "ocr_text:words",
+            "^words",
+            "{ocr_text}: words",
+            "(words",
+            "'; DROP TABLE frames; --",
+            "+",
+            "\u{E000}words\u{E001}",
+        ] {
+            assert!(
+                db.search(nasty, None).is_ok(),
+                "query {nasty:?} should not error"
+            );
+        }
+        // Still intact, and syntax-looking input is matched literally.
+        assert_eq!(db.search("ocr_text:words", None).unwrap().len(), 0);
+        assert_eq!(db.search("words", Some(100)).unwrap().len(), 100);
+    }
+
+    #[test]
+    fn search_unicode() {
+        let db = Db::open_in_memory().unwrap();
+        let s = db.start_session(None).unwrap();
+        let f = db
+            .add_frame(s.id, 1, None, "Viele Grüße aus München")
+            .unwrap();
+        assert_eq!(db.search("grüße", None).unwrap()[0].frame_id, f);
+        assert_eq!(db.search("MÜNCH", None).unwrap()[0].frame_id, f);
     }
 
     #[test]
@@ -481,13 +782,13 @@ mod tests {
         assert_eq!(rows[1].ocr_status, OCR_DONE); // pruned, nothing to read
         assert_eq!(rows[2].ocr_status, OCR_DONE);
         assert_eq!(rows[2].ocr_text, "already indexed");
-        assert_eq!(db.search("indexed").unwrap().len(), 1);
+        assert_eq!(db.search("indexed", None).unwrap().len(), 1);
 
         db.set_ocr_result(rows[0].id, "migrated hello", OCR_DONE)
             .unwrap();
-        assert_eq!(db.search("hello").unwrap()[0].0, rows[0].id);
+        assert_eq!(db.search("hello", None).unwrap()[0].frame_id, rows[0].id);
         // The UPDATE OF ocr_text trigger refreshed FTS (not a stale empty doc).
-        assert!(!db.search("hello").unwrap().is_empty());
+        assert!(!db.search("hello", None).unwrap().is_empty());
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
