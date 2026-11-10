@@ -20,6 +20,7 @@ export default function App() {
   const [hasPermission, setHasPermission] = useState(true);
   const [viewing, setViewing] = useState<Session | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
+  const [ocrPending, setOcrPending] = useState(0);
 
   const refresh = useCallback(async () => {
     try {
@@ -37,6 +38,7 @@ export default function App() {
       setHasPermission(st.has_permission);
       setCaptureError(st.capture_error);
       setActive(st.active);
+      setOcrPending(st.ocr_pending);
     } catch (e) {
       setError(String(e));
     }
@@ -49,9 +51,9 @@ export default function App() {
 
   // Live frame count: poll while recording; re-check permission every few seconds when idle.
   useEffect(() => {
-    const t = setInterval(pollStatus, active ? 2000 : 5000);
+    const t = setInterval(pollStatus, active || ocrPending > 0 ? 2000 : 5000);
     return () => clearInterval(t);
-  }, [active, pollStatus]);
+  }, [active, ocrPending, pollStatus]);
 
   useEffect(() => {
     if (!active) return;
@@ -104,6 +106,7 @@ export default function App() {
         </button>
         <p className="status">
           {active ? `Recording · ${active.frame_count} ${active.frame_count === 1 ? "frame" : "frames"}` : "Idle"}
+          {ocrPending > 0 ? ` · OCR: ${ocrPending} pending` : ""}
         </p>
         {captureError && <p className="error">Capture problem: {captureError}</p>}
         {error && <p className="error">{error}</p>}

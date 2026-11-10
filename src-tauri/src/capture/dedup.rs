@@ -18,12 +18,21 @@ impl Thumb {
     pub fn from_rgba(rgba: &[u8], width: u32, height: u32) -> Option<Thumb> {
         let img = image::RgbaImage::from_raw(width, height, rgba.to_vec())?;
         let gray = image::DynamicImage::ImageRgba8(img).into_luma8();
-        let small = image::imageops::resize(&gray, THUMB_W, THUMB_H, image::imageops::FilterType::Triangle);
+        let small = image::imageops::resize(
+            &gray,
+            THUMB_W,
+            THUMB_H,
+            image::imageops::FilterType::Triangle,
+        );
         Some(Thumb(small.into_raw()))
     }
 
     pub fn changed_cells(&self, other: &Thumb) -> usize {
-        self.0.iter().zip(&other.0).filter(|(a, b)| a.abs_diff(**b) > CELL_TOLERANCE).count()
+        self.0
+            .iter()
+            .zip(&other.0)
+            .filter(|(a, b)| a.abs_diff(**b) > CELL_TOLERANCE)
+            .count()
     }
 
     /// `true` when `self` differs enough from `prev` to be worth saving.
@@ -37,7 +46,8 @@ impl Thumb {
 
 /// Encode RGBA pixels as JPEG (alpha dropped). Quality 0-100.
 pub fn encode_jpeg(rgba: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>, String> {
-    let img = image::RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or("bad frame buffer size")?;
+    let img =
+        image::RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or("bad frame buffer size")?;
     let rgb = image::DynamicImage::ImageRgba8(img).into_rgb8();
     let mut out = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality)

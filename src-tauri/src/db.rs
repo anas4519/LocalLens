@@ -7,6 +7,10 @@ use serde::Serialize;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub const OCR_PENDING: i64 = 0;
+pub const OCR_DONE: i64 = 1;
+pub const OCR_FAILED: i64 = 2;
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct FrameRow {
     pub id: i64,
@@ -14,6 +18,8 @@ pub struct FrameRow {
     /// Relative to the app data dir; None once the image was pruned.
     pub image_path: Option<String>,
     pub ocr_text: String,
+    /// 0 = pending, 1 = done (text may still be empty), 2 = failed.
+    pub ocr_status: i64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -35,7 +41,8 @@ CREATE TABLE IF NOT EXISTS frames (
     session_id  INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     ts          INTEGER NOT NULL,
     image_path  TEXT,              -- nullable: images expire, text stays
-    ocr_text    TEXT NOT NULL DEFAULT ''
+    ocr_text    TEXT NOT NULL DEFAULT '',
+    ocr_status  INTEGER NOT NULL DEFAULT 0  -- 0 pending, 1 done, 2 failed
 );
 CREATE INDEX IF NOT EXISTS idx_frames_session_ts ON frames(session_id, ts);
 CREATE VIRTUAL TABLE IF NOT EXISTS frames_fts USING fts5(
@@ -53,8 +60,38 @@ CREATE TRIGGER IF NOT EXISTS frames_au AFTER UPDATE OF ocr_text ON frames BEGIN
 END;
 "#;
 
+fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Add `ocr_status` to databases created before this column existed, and
+/// classify already-stored rows so we don't re-OCR finished work.
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    if !column_exists(conn, "frames", "ocr_status")? {
+        conn.execute_batch("ALTER TABLE frames ADD COLUMN ocr_status INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_frames_ocr_status ON frames(ocr_status);")?;
+    // Already has text, or can never be read (image pruned): mark done.
+    conn.execute(
+        "UPDATE frames SET ocr_status = ?1 WHERE ocr_status = ?2 AND (ocr_text != '' OR image_path IS NULL)",
+        params![OCR_DONE, OCR_PENDING],
+    )?;
+    Ok(())
+}
+
 fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 pub struct Db {
@@ -72,8 +109,11 @@ impl Db {
     }
 
     fn init(conn: Connection) -> rusqlite::Result<Self> {
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+        )?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Self { conn })
     }
 
@@ -93,13 +133,21 @@ impl Db {
         if let Some(s) = self.active_session()? {
             return Ok(s);
         }
-        self.conn.execute("INSERT INTO sessions (started_at) VALUES (?1)", params![now_ms()])?;
+        self.conn.execute(
+            "INSERT INTO sessions (started_at) VALUES (?1)",
+            params![now_ms()],
+        )?;
         self.get(self.conn.last_insert_rowid())
     }
 
     pub fn stop_session(&self) -> rusqlite::Result<Option<Session>> {
-        let Some(active) = self.active_session()? else { return Ok(None) };
-        self.conn.execute("UPDATE sessions SET ended_at = ?1 WHERE id = ?2", params![now_ms(), active.id])?;
+        let Some(active) = self.active_session()? else {
+            return Ok(None);
+        };
+        self.conn.execute(
+            "UPDATE sessions SET ended_at = ?1 WHERE id = ?2",
+            params![now_ms(), active.id],
+        )?;
         self.get(active.id).map(Some)
     }
 
@@ -113,12 +161,60 @@ impl Db {
     }
 
     #[allow(dead_code)]
-    pub fn add_frame(&self, session_id: i64, ts: i64, image_path: Option<&str>, ocr_text: &str) -> rusqlite::Result<i64> {
+    pub fn add_frame(
+        &self,
+        session_id: i64,
+        ts: i64,
+        image_path: Option<&str>,
+        ocr_text: &str,
+    ) -> rusqlite::Result<i64> {
+        let status = if !ocr_text.is_empty() {
+            OCR_DONE
+        } else if image_path.is_some() {
+            OCR_PENDING
+        } else {
+            OCR_DONE // no image to read
+        };
         self.conn.execute(
-            "INSERT INTO frames (session_id, ts, image_path, ocr_text) VALUES (?1, ?2, ?3, ?4)",
-            params![session_id, ts, image_path, ocr_text],
+            "INSERT INTO frames (session_id, ts, image_path, ocr_text, ocr_status) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_id, ts, image_path, ocr_text, status],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn set_ocr_result(&self, id: i64, ocr_text: &str, ocr_status: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE frames SET ocr_text = ?1, ocr_status = ?2 WHERE id = ?3",
+            params![ocr_text, ocr_status, id],
+        )?;
+        Ok(())
+    }
+
+    /// Pending jobs that still have an image on disk (path stored; file may still be missing).
+    pub fn pending_ocr_ids(&self) -> rusqlite::Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM frames WHERE ocr_status = ?1 AND image_path IS NOT NULL ORDER BY id",
+        )?;
+        let rows = stmt.query_map([OCR_PENDING], |r| r.get(0))?;
+        rows.collect()
+    }
+
+    pub fn ocr_job(&self, id: i64) -> rusqlite::Result<Option<(Option<String>, i64)>> {
+        self.conn
+            .query_row(
+                "SELECT image_path, ocr_status FROM frames WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+    }
+
+    pub fn ocr_pending_count(&self) -> rusqlite::Result<i64> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM frames WHERE ocr_status = ?1",
+            [OCR_PENDING],
+            |r| r.get(0),
+        )
     }
 
     /// Full-text search over OCR text; returns (frame_id, session_id, ts).
@@ -135,10 +231,16 @@ impl Db {
     /// All frames of a session, oldest first.
     pub fn list_frames(&self, session_id: i64) -> rusqlite::Result<Vec<FrameRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, ts, image_path, ocr_text FROM frames WHERE session_id = ?1 ORDER BY ts, id",
+            "SELECT id, ts, image_path, ocr_text, ocr_status FROM frames WHERE session_id = ?1 ORDER BY ts, id",
         )?;
         let rows = stmt.query_map([session_id], |r| {
-            Ok(FrameRow { id: r.get(0)?, ts: r.get(1)?, image_path: r.get(2)?, ocr_text: r.get(3)? })
+            Ok(FrameRow {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                image_path: r.get(2)?,
+                ocr_text: r.get(3)?,
+                ocr_status: r.get(4)?,
+            })
         })?;
         rows.collect()
     }
@@ -154,7 +256,12 @@ impl Db {
 }
 
 fn row_to_session(r: &rusqlite::Row) -> rusqlite::Result<Session> {
-    Ok(Session { id: r.get(0)?, started_at: r.get(1)?, ended_at: r.get(2)?, frame_count: r.get(3)? })
+    Ok(Session {
+        id: r.get(0)?,
+        started_at: r.get(1)?,
+        ended_at: r.get(2)?,
+        frame_count: r.get(3)?,
+    })
 }
 
 #[cfg(test)]
@@ -198,9 +305,70 @@ mod tests {
     fn fts_finds_frame_text() {
         let db = Db::open_in_memory().unwrap();
         let s = db.start_session().unwrap();
-        let f = db.add_frame(s.id, 1, None, "spring retry config maxAttempts").unwrap();
-        db.add_frame(s.id, 2, Some("frames/2.png"), "unrelated").unwrap();
+        let f = db
+            .add_frame(s.id, 1, None, "spring retry config maxAttempts")
+            .unwrap();
+        db.add_frame(s.id, 2, Some("frames/2.png"), "unrelated")
+            .unwrap();
         let hits = db.search("retry").unwrap();
         assert_eq!(hits, vec![(f, s.id, 1)]);
+    }
+
+    #[test]
+    fn migrates_legacy_db_and_updates_fts_on_ocr_write() {
+        let path = std::env::temp_dir().join(format!(
+            "locallens-mig-{}-{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(r#"
+                CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER NOT NULL, ended_at INTEGER);
+                CREATE TABLE frames (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    ts INTEGER NOT NULL,
+                    image_path TEXT,
+                    ocr_text TEXT NOT NULL DEFAULT ''
+                );
+                CREATE VIRTUAL TABLE frames_fts USING fts5(ocr_text, content='frames', content_rowid='id');
+                CREATE TRIGGER frames_ai AFTER INSERT ON frames BEGIN
+                    INSERT INTO frames_fts(rowid, ocr_text) VALUES (new.id, new.ocr_text);
+                END;
+                CREATE TRIGGER frames_ad AFTER DELETE ON frames BEGIN
+                    INSERT INTO frames_fts(frames_fts, rowid, ocr_text) VALUES ('delete', old.id, old.ocr_text);
+                END;
+                CREATE TRIGGER frames_au AFTER UPDATE OF ocr_text ON frames BEGIN
+                    INSERT INTO frames_fts(frames_fts, rowid, ocr_text) VALUES ('delete', old.id, old.ocr_text);
+                    INSERT INTO frames_fts(rowid, ocr_text) VALUES (new.id, new.ocr_text);
+                END;
+                INSERT INTO sessions (started_at) VALUES (1);
+                INSERT INTO frames (session_id, ts, image_path, ocr_text) VALUES (1, 10, 'frames/1/a.jpg', '');
+                INSERT INTO frames (session_id, ts, image_path, ocr_text) VALUES (1, 20, NULL, '');
+                INSERT INTO frames (session_id, ts, image_path, ocr_text) VALUES (1, 30, NULL, 'already indexed');
+            "#).unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        let rows = db.list_frames(1).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].ocr_status, OCR_PENDING); // has image, empty text
+        assert_eq!(rows[1].ocr_status, OCR_DONE); // pruned, nothing to read
+        assert_eq!(rows[2].ocr_status, OCR_DONE);
+        assert_eq!(rows[2].ocr_text, "already indexed");
+        assert_eq!(db.search("indexed").unwrap().len(), 1);
+
+        db.set_ocr_result(rows[0].id, "migrated hello", OCR_DONE)
+            .unwrap();
+        assert_eq!(db.search("hello").unwrap()[0].0, rows[0].id);
+        // The UPDATE OF ocr_text trigger refreshed FTS (not a stale empty doc).
+        assert!(db.search("hello").unwrap().len() >= 1);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
     }
 }

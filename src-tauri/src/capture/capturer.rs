@@ -50,7 +50,11 @@ pub struct Capturer<S: ScreenSource> {
 
 impl<S: ScreenSource> Capturer<S> {
     pub fn new(source: S) -> Self {
-        Self { source, last: None, started: false }
+        Self {
+            source,
+            last: None,
+            started: false,
+        }
     }
 }
 
@@ -59,7 +63,9 @@ impl<S: ScreenSource> ScreenCapturer for Capturer<S> {
         self.source.available()?;
         if !self.source.has_permission() {
             self.source.request_permission();
-            return Err(CaptureError::Permission(self.source.permission_hint().into()));
+            return Err(CaptureError::Permission(
+                self.source.permission_hint().into(),
+            ));
         }
         self.last = None;
         self.started = true;
@@ -76,7 +82,11 @@ impl<S: ScreenSource> ScreenCapturer for Capturer<S> {
         if !self.started {
             return Ok(None);
         }
-        let RawImage { rgba, width, height } = self.source.grab(MAX_EDGE)?;
+        let RawImage {
+            rgba,
+            width,
+            height,
+        } = self.source.grab(MAX_EDGE)?;
         let thumb = Thumb::from_rgba(&rgba, width, height)
             .ok_or_else(|| CaptureError::Other("unexpected frame buffer size".into()))?;
         if !thumb.is_new(self.last.as_ref()) {
@@ -84,8 +94,16 @@ impl<S: ScreenSource> ScreenCapturer for Capturer<S> {
         }
         self.last = Some(thumb);
         let image = encode_jpeg(&rgba, width, height, JPEG_QUALITY).map_err(CaptureError::Other)?;
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
-        Ok(Some(Frame { ts, image, width, height }))
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        Ok(Some(Frame {
+            ts,
+            image,
+            width,
+            height,
+        }))
     }
 }
 
@@ -100,13 +118,21 @@ mod tests {
     }
 
     impl ScreenSource for FakeSource {
-        fn has_permission(&self) -> bool { self.permitted }
-        fn permission_hint(&self) -> &'static str { "grant it" }
+        fn has_permission(&self) -> bool {
+            self.permitted
+        }
+        fn permission_hint(&self) -> &'static str {
+            "grant it"
+        }
         fn grab(&mut self, max_edge: usize) -> Result<RawImage, CaptureError> {
             let v = self.frames.remove(0);
             let (w, h) = fit(640, 360, max_edge);
             let (w, h) = (w as u32, h as u32);
-            Ok(RawImage { rgba: (0..w * h).flat_map(|_| [v, v, v, 255]).collect(), width: w, height: h })
+            Ok(RawImage {
+                rgba: (0..w * h).flat_map(|_| [v, v, v, 255]).collect(),
+                width: w,
+                height: h,
+            })
         }
     }
 
@@ -120,19 +146,28 @@ mod tests {
 
     #[test]
     fn capturer_dedups_and_encodes() {
-        let mut c = Capturer::new(FakeSource { permitted: true, frames: vec![20, 21, 200] });
+        let mut c = Capturer::new(FakeSource {
+            permitted: true,
+            frames: vec![20, 21, 200],
+        });
         assert!(c.next_frame().unwrap().is_none(), "not started yet");
         c.start().unwrap();
         let first = c.next_frame().unwrap().expect("first frame is always new");
         assert_eq!(&first.image[..2], &[0xFF, 0xD8]); // JPEG magic
         assert_eq!((first.width, first.height), (640, 360));
-        assert!(c.next_frame().unwrap().is_none(), "near-identical frame skipped");
+        assert!(
+            c.next_frame().unwrap().is_none(),
+            "near-identical frame skipped"
+        );
         assert!(c.next_frame().unwrap().is_some(), "changed frame kept");
     }
 
     #[test]
     fn capturer_reports_missing_permission() {
-        let mut c = Capturer::new(FakeSource { permitted: false, frames: vec![] });
+        let mut c = Capturer::new(FakeSource {
+            permitted: false,
+            frames: vec![],
+        });
         let e = c.start().unwrap_err();
         assert_eq!(e.to_string(), "permission denied: grant it");
     }

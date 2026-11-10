@@ -56,10 +56,18 @@ pub fn has_permission() -> bool {
 #[derive(Default)]
 pub struct NoSource;
 impl ScreenSource for NoSource {
-    fn available(&self) -> Result<(), CaptureError> { Err(CaptureError::Unsupported) }
-    fn has_permission(&self) -> bool { true }
-    fn permission_hint(&self) -> &'static str { "" }
-    fn grab(&mut self, _max_edge: usize) -> Result<RawImage, CaptureError> { Err(CaptureError::Unsupported) }
+    fn available(&self) -> Result<(), CaptureError> {
+        Err(CaptureError::Unsupported)
+    }
+    fn has_permission(&self) -> bool {
+        true
+    }
+    fn permission_hint(&self) -> &'static str {
+        ""
+    }
+    fn grab(&mut self, _max_edge: usize) -> Result<RawImage, CaptureError> {
+        Err(CaptureError::Unsupported)
+    }
 }
 
 /// Grabs frames from the screen. Implementations should skip near-duplicate
@@ -72,8 +80,24 @@ pub trait ScreenCapturer: Send {
     fn next_frame(&mut self) -> Result<Option<Frame>, CaptureError>;
 }
 
-/// Turns a frame into text, fully on-device.
-#[allow(dead_code)]
+/// Turns image bytes (JPEG) into text, fully on-device.
 pub trait OcrEngine: Send + Sync {
-    fn recognize(&self, frame: &Frame) -> Result<String, CaptureError>;
+    fn recognize(&self, image: &[u8]) -> Result<String, CaptureError>;
+}
+
+/// The OCR engine for the current OS (the only cfg'd choice point).
+pub fn platform_ocr() -> Box<dyn OcrEngine> {
+    #[cfg(target_os = "macos")]
+    return Box::new(macos::VisionOcr);
+    #[cfg(target_os = "windows")]
+    return Box::new(windows::WinOcr);
+    #[allow(unreachable_code)]
+    Box::new(NoOcr)
+}
+
+struct NoOcr;
+impl OcrEngine for NoOcr {
+    fn recognize(&self, _image: &[u8]) -> Result<String, CaptureError> {
+        Err(CaptureError::Unsupported)
+    }
 }

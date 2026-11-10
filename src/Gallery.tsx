@@ -1,6 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useState } from "react";
-import { FrameRow, Session, listFrames } from "./api";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { FrameRow, OCR_FAILED, OCR_PENDING, Session, listFrames } from "./api";
 
 const fmtTime = (ts: number) =>
   new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -22,14 +22,65 @@ function Placeholder({ large = false }: { large?: boolean }) {
   );
 }
 
+function OcrPanel({ frame }: { frame: FrameRow }) {
+  const [copied, setCopied] = useState(false);
+  const pending = frame.ocr_status === OCR_PENDING;
+  const failed = frame.ocr_status === OCR_FAILED;
+  const text = frame.ocr_text.trim();
+
+  const copy = async () => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(frame.ocr_text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      /* webview may deny clipboard; the text is still selectable */
+    }
+  };
+
+  let body: ReactNode;
+  if (pending) body = <p className="ocr-placeholder">Reading text…</p>;
+  else if (failed) body = <p className="ocr-placeholder">Couldn’t read this frame</p>;
+  else if (!text) body = <p className="ocr-placeholder">No text found</p>;
+  else body = <pre>{frame.ocr_text}</pre>;
+
+  return (
+    <aside className="ocr-panel">
+      <header>
+        <span>Text</span>
+        {text ? (
+          <button className="ghost compact" onClick={copy}>
+            {copied ? "Copied" : "Copy"}
+          </button>
+        ) : null}
+      </header>
+      {body}
+    </aside>
+  );
+}
+
 export default function Gallery({ session, onBack }: { session: Session; onBack: () => void }) {
   const [frames, setFrames] = useState<FrameRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<number | null>(null);
 
-  useEffect(() => {
+  const refreshFrames = useCallback(() => {
     listFrames(session.id).then(setFrames).catch((e) => setError(String(e)));
   }, [session.id]);
+
+  useEffect(() => {
+    refreshFrames();
+  }, [refreshFrames]);
+
+  const pending = frames?.filter((f) => f.ocr_status === OCR_PENDING).length ?? 0;
+
+  // Refresh while OCR is still catching up, including the open lightbox.
+  useEffect(() => {
+    if (pending === 0) return;
+    const t = setInterval(refreshFrames, 2000);
+    return () => clearInterval(t);
+  }, [pending, refreshFrames]);
 
   const count = frames?.length ?? 0;
   const step = useCallback(
@@ -62,7 +113,9 @@ export default function Gallery({ session, onBack }: { session: Session; onBack:
         <div>
           <h1>{new Date(session.started_at).toLocaleString()}</h1>
           <p className="tagline">
-            {frames ? `${count} ${count === 1 ? "frame" : "frames"}` : "Loading…"}
+            {frames
+              ? `${count} ${count === 1 ? "frame" : "frames"}${pending > 0 ? ` · OCR: ${pending} pending` : ""}`
+              : "Loading…"}
           </p>
         </div>
       </header>
@@ -91,6 +144,7 @@ export default function Gallery({ session, onBack }: { session: Session; onBack:
             ) : (
               <Placeholder large />
             )}
+            <OcrPanel frame={current} />
             <div className="lightbox-bar">
               <button className="ghost" onClick={() => step(-1)} disabled={open === 0}>
                 ←
